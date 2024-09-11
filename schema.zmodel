@@ -1,0 +1,257 @@
+import "base"
+
+generator client {
+    provider = "prisma-client-js"
+    previewFeatures = ["fullTextSearch"]
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+plugin hooks {
+    provider = '@zenstackhq/tanstack-query'
+    target = 'react'
+    output = "./src/lib/hooks"
+}
+
+plugin openapi {
+    provider = "@zenstackhq/openapi"
+    output = "openapi.yaml"
+    prefix  = "/api"
+    version = "1.0.0"
+    securitySchemes = {
+        bearer: {type: "http", scheme: "bearer", bearerFormat: "JWT"}
+    }
+    title    = "Raffle System API"
+    description = "API for the Raffle System"
+}
+
+// User-related models
+model User extends Base {
+    email          String?          @unique @email @lower @trim
+    emailVerified  DateTime?        @map("email_verified")
+    password       String           @password @length(min: 8, max: 32) @trim @omit
+    documentNumber String           @unique @trim @map("document_number")
+    phoneNumber    String           @unique @trim @map("phone_number")
+    role           UserRole         @default(USER) @deny('update', auth().role == 'USER')
+    age            Int              @gt(0) @lte(120)
+    firstName      String           @trim @map("first_name")
+    lastName       String?          @trim @map("last_name")
+    imageUrl       String           @url @lower @trim @map("image_url")
+    termsAccepted  Boolean          @default(false) @map("terms_accepted")
+    marketingOptIn Boolean          @default(false) @map("marketing_opt_in")
+    disabledAt     DateTime?        @map("disabled_at") @deny('update', auth().role == 'USER')
+    bannedAt       DateTime?        @map("banned_at")
+    lastLogin      DateTime?        @map("last_login")
+
+    accounts       Account[]
+    auditLogs      AuditLog[]       @omit
+    rafflesCreated Raffle[]
+    rafflesWon     WinnerOnRaffle[]
+    sessions       Session[]
+    tickets        Ticket[]
+
+    @@allow('create', true)
+    @@allow('read, update, delete', auth() == this)
+
+    @@map("users")
+}
+
+model Account extends Base {
+    userId                   String  @map("user_id")
+    access_token             String?
+    expires_at               Int?
+    id_token                 String?
+    provider                 String
+    providerAccountId        String  @map("provider_account_id")
+    refresh_token            String?
+    refresh_token_expires_in Int?
+    scope                    String?
+    session_state            String?
+    token_type               String?
+    type                     String
+
+    user                     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([provider, providerAccountId])
+    @@map("accounts")
+}
+
+model Session extends Base {
+    userId       String   @map("user_id")
+    expires      DateTime
+    ipAddress    String?  @map("ip_address")
+    sessionToken String   @unique @map("session_token")
+    userAgent    String?  @map("user_agent")
+
+    user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@map("sessions")
+}
+
+model VerificationToken extends Base {
+    identifier String
+    expires    DateTime
+    token      String   @unique
+
+    @@unique([identifier, token])
+    @@map("verification_tokens")
+}
+
+model AuditLog extends Base {
+    userId    String  @map("user_id")
+    action    String
+    details   String?
+    ipAddress String? @map("ip_address")
+
+    user      User    @relation(fields: [userId], references: [id])
+
+    @@map("audit_logs")
+}
+
+// Raffle-related models
+model Raffle extends Base {
+    creatorId       String           @default(auth().id) @map("creator_id")
+    name            String           @trim
+    description     String           @db.Text @trim
+    imageUrl        String           @url @lower @trim @map("image_url")
+    status          RaffleStatus     @default(PENDING)
+    currency        CurrencyType     @default(BRL)
+    ticketPrice     Decimal          @gt(0) @lte(999999) @map("ticket_price")
+    drawDate        DateTime         @map("draw_date")
+    drawEndDate     DateTime?        @map("draw_end_date")
+    drawType        RaffleDrawType   @default(INTERNAL) @map("draw_type")
+    maxTickets      RaffleMaxTickets @default(VINTEECINCO) @map("max_tickets")
+    isCharity       Boolean          @default(false) @map("is_charity")
+    charityInfo     String?          @trim @map("charity_info")
+    termsConditions String           @db.Text @trim @map("terms_conditions")
+
+    prizes          Prize[]
+    tickets         Ticket[]
+    winners         WinnerOnRaffle[]
+
+    creator         User             @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+    @@deny('update', future().creator != creator)
+
+    @@allow('all', creator == auth())
+    @@allow('read', status == 'PUBLISHED')
+    @@allow('create', auth() != null)
+
+    @@index([status, drawDate])
+    @@map("raffles")
+}
+
+model Prize extends Base {
+    raffleId    String           @map("raffle_id")
+    name        String           @trim
+    description String           @db.Text @trim
+    imageUrl    String?          @url @lower @trim @map("image_url")
+    quantity    Int              @default(1)
+    value       Decimal          @gt(0) @lte(999999)
+
+    winners     WinnerOnRaffle[]
+
+    raffle      Raffle           @relation(fields: [raffleId], references: [id])
+
+    @@allow('read', true)
+    @@allow('all', auth() == raffle.creator)
+    @@deny('update', future().raffle != raffle)
+
+    @@map("prizes")
+}
+
+model Ticket extends Base {
+    raffleId  String       @map("raffle_id")
+    ownerId   String       @map("owner_id")
+    status    TicketStatus @default(PENDING)
+    number    Int?
+    paymentId String?      @unique @omit @map("payment_id")
+
+    owner     User         @relation(fields: [ownerId], references: [id])
+    raffle    Raffle       @relation(fields: [raffleId], references: [id])
+
+    @@allow('read', auth() == owner)
+
+    @@unique([raffleId, number])
+    @@index([status, raffleId])
+    @@map("tickets")
+}
+
+model WinnerOnRaffle extends Base {
+    prizeId   String    @map("prize_id")
+    raffleId  String    @map("raffle_id")
+    winnerId  String    @map("winner_id")
+    claimedAt DateTime? @map("claimed_at")
+
+    prize     Prize     @relation(fields: [prizeId], references: [id])
+    raffle    Raffle    @relation(fields: [raffleId], references: [id])
+    winner    User      @relation(fields: [winnerId], references: [id])
+
+    @@allow('read', true)
+
+    @@unique([raffleId, winnerId, prizeId])
+    @@map("winners_on_raffle")
+}
+
+// Enums
+enum CurrencyType {
+    BRL
+    USD
+}
+
+enum UserRole {
+    USER
+    ADMIN
+}
+
+enum RaffleDrawType {
+    INTERNAL
+    LOTERIA_FEDERAL
+}
+
+enum RaffleMaxTickets {
+    VINTEECINCO
+    CINQUENTA
+    CEM
+    DUZENTOS
+    TREZENTOS
+    QUATROCENTOS
+    QUINHENTOS
+    SEISCENTOS
+    SETECENTOS
+    OITOCENTOS
+    NOVECENTOS
+    UM_K
+    DOIS_K
+    TRES_K
+    QUATRO_K
+    CINCO_K
+    SEIS_K
+    DEZ_K
+    VINTE_K
+    TRINTA_K
+    CINQUENTA_K
+    CEM_K
+    QUINHENTOS_K
+    UM_KK
+    UM_KK_E_QUINHENTOS_K
+    DEZ_KK
+}
+
+enum RaffleStatus {
+    PENDING
+    PUBLISHED
+    FINISHED
+}
+
+enum TicketStatus {
+    PENDING
+    VALID
+    CANCELED
+    REFUNDED
+    USED
+}
+
